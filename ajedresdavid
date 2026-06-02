@@ -454,10 +454,10 @@ class Sentinel(Pieza):  # Define una clase (plantilla para crear objetos)
 
 class Hexblade(Pieza):  # Define una clase (plantilla para crear objetos)
     """
-    Hexblade — pieza de salto; equivale al Caballo extendido.
+    Hexblade — pieza de salto; equivale al Caballo de ajedrez.
 
-    Movimiento: salto en L clásico (2+1), más puede avanzar 1 casilla
-    adicional en cualquier dirección desde el destino del salto.
+    Movimiento: salto en L estándar (2+1 o 1+2), ignora piezas intermedias.
+    Puede capturar enemigos en el destino del salto.
     """
 
     # Saltos de caballo estándar
@@ -479,32 +479,26 @@ class Hexblade(Pieza):  # Define una clase (plantilla para crear objetos)
 
     def movimientos_validos(self, cuadricula: list) -> list[tuple[int, int]]:  # Define una función o método
         """
-        Calcula los saltos del Hexblade más los pasos extra desde el destino.
+        Calcula los saltos en L del Hexblade (8 destinos posibles en L).
+
+        Salta en L ignorando piezas intermedias. No puede aterrizar
+        sobre aliados; sí puede capturar enemigos en el destino.
 
         Args:
             cuadricula (list): Estado actual del tablero.
 
         Returns:
-            list[tuple[int,int]]: Casillas alcanzables (sin duplicados).
+            list[tuple[int,int]]: Casillas alcanzables.
         """
-        movimientos = set()
+        movimientos = []
         for df, dc in self._SALTOS:  # Repite el bloque por cada elemento del iterable
             f, c = self.fila + df, self.columna + dc
             if not self._dentro_tablero(f, c):  # Evalúa una condición; ejecuta el bloque si es verdadera
                 continue  # Salta a la siguiente iteración del bucle
             if self._es_aliado(cuadricula, f, c):  # Evalúa una condición; ejecuta el bloque si es verdadera
                 continue  # Salta a la siguiente iteración del bucle
-            movimientos.add((f, c))
-            # Paso extra desde el destino del salto (solo si la casilla estaba libre)
-            if cuadricula[f][c] is None:  # Evalúa una condición; ejecuta el bloque si es verdadera
-                for df2, dc2 in [(-1, 0), (1, 0), (0, -1), (0, 1)]:  # Repite el bloque por cada elemento del iterable
-                    f2, c2 = f + df2, c + dc2
-                    # Excluir la casilla de origen para evitar movimiento nulo
-                    if (f2, c2) == (self.fila, self.columna):  # Evalúa una condición; ejecuta el bloque si es verdadera
-                        continue  # Salta a la siguiente iteración del bucle
-                    if self._dentro_tablero(f2, c2) and not self._es_aliado(cuadricula, f2, c2):  # Evalúa una condición; ejecuta el bloque si es verdadera
-                        movimientos.add((f2, c2))
-        return list(movimientos)  # Devuelve un valor y termina la función
+            movimientos.append((f, c))
+        return movimientos  # Devuelve un valor y termina la función
 
 
 class RunePawn(Pieza):  # Define una clase (plantilla para crear objetos)
@@ -941,7 +935,7 @@ class Tablero:  # Define una clase (plantilla para crear objetos)
 
 # Símbolos Unicode para cada tipo de pieza
 _SIMBOLOS = {
-    GUARDIAN:  "♚",
+    GUARDIAN:  "★",  # Símbolo distintivo para no confundirlo con el Invoker (♛)
     INVOKER:   "♛",
     LANCER:    "♝",
     SENTINEL:  "♜",
@@ -3879,6 +3873,11 @@ class PCRuneWars:  # Define una clase (plantilla para crear objetos)
         """
         Recopila todos los movimientos legales para un jugador en el tablero.
 
+        Respeta la habilidad de runa (energía máxima) de la misma forma que
+        lo hace Tablero.seleccionar_pieza, para que los movimientos generados
+        aquí sean siempre consistentes con los highlights que se usarán al
+        ejecutar el movimiento real.
+
         Args:
             tablero (Tablero): Estado actual.
             jugador (str)    : Jugador cuyos movimientos se calculan.
@@ -3887,12 +3886,28 @@ class PCRuneWars:  # Define una clase (plantilla para crear objetos)
             list[tuple]: Lista de ((fila_o, col_o), (fila_d, col_d)).
         """
         movimientos = []
+        claveEnergia = "energia_j1" if jugador == JUGADOR_1 else "energia_j2"
+        runaActiva   = tablero.estado.get(claveEnergia, 0) >= ENERGIA_MAX
+
         for fi in range(FILAS):  # Repite el bloque por cada elemento del iterable
             for ci in range(COLUMNAS):  # Repite el bloque por cada elemento del iterable
                 pieza = tablero.cuadricula[fi][ci]
                 if pieza is None or pieza.jugador != jugador:  # Evalúa una condición; ejecuta el bloque si es verdadera
                     continue  # Salta a la siguiente iteración del bucle
-                for destino in pieza.movimientos_validos(tablero.cuadricula):  # Repite el bloque por cada elemento del iterable
+
+                if runaActiva and pieza.tipo in (INVOKER, LANCER, SENTINEL):
+                    # Habilidad de runa: las piezas de línea atraviesan aliados
+                    cuadriculaTmp = [fila[:] for fila in tablero.cuadricula]
+                    for fj in range(FILAS):
+                        for cj in range(COLUMNAS):
+                            p = cuadriculaTmp[fj][cj]
+                            if p is not None and p.jugador == jugador and (fj, cj) != (fi, ci):
+                                cuadriculaTmp[fj][cj] = None
+                    destinos = pieza.movimientos_validos(cuadriculaTmp)
+                else:
+                    destinos = pieza.movimientos_validos(tablero.cuadricula)
+
+                for destino in destinos:  # Repite el bloque por cada elemento del iterable
                     movimientos.append(((fi, ci), destino))
         return movimientos  # Devuelve un valor y termina la función
 
@@ -4102,14 +4117,37 @@ class Juego:  # Define una clase (plantilla para crear objetos)
         Pide a la PC el mejor movimiento y lo aplica en el tablero.
 
         Solo se invoca cuando es turno de JUGADOR_2 en modo PC.
+        Valida que la selección haya sido exitosa antes de intentar mover
+        para evitar movimientos ilegales cuando la pieza de origen ya no
+        pertenece a JUGADOR_2 o el turno cambió inesperadamente.
         """
         if self._pc is None:  # Evalúa una condición; ejecuta el bloque si es verdadera
             return  # Devuelve un valor y termina la función
+
+        # Guardia extra: asegurar que realmente sea turno de la PC
+        if self.tablero.estado.get("jugador_activo") != JUGADOR_2:  # Evalúa una condición; ejecuta el bloque si es verdadera
+            return  # Devuelve un valor y termina la función
+
         movimiento = self._pc.elegir_movimiento(self.tablero)
         if movimiento is None:  # Evalúa una condición; ejecuta el bloque si es verdadera
             return  # Devuelve un valor y termina la función
+
         origen, destino = movimiento
-        self.tablero.seleccionar_pieza(origen[0], origen[1])
+
+        # seleccionar_pieza retorna False si la pieza no pertenece al jugador activo
+        seleccionOk = self.tablero.seleccionar_pieza(origen[0], origen[1])
+        if not seleccionOk:  # Evalúa una condición; ejecuta el bloque si es verdadera
+            # La pieza ya no existe o no pertenece a JUGADOR_2; abortar turno
+            self.tablero.pieza_sel  = None
+            self.tablero.highlights = {}
+            return  # Devuelve un valor y termina la función
+
+        # Verificar que el destino esté en los highlights generados
+        if destino not in self.tablero.highlights:  # Evalúa una condición; ejecuta el bloque si es verdadera
+            self.tablero.pieza_sel  = None
+            self.tablero.highlights = {}
+            return  # Devuelve un valor y termina la función
+
         self.tablero.mover_pieza(destino[0], destino[1])
         if self.tablero.ganador is not None:  # Evalúa una condición; ejecuta el bloque si es verdadera
             self.estadoPartida = "game_over"
@@ -4620,9 +4658,6 @@ def main() -> None:  # Define una función o método
 
 if __name__ == "__main__":  # Evalúa una condición; ejecuta el bloque si es verdadera
     main()
-
-
-
 
 
 
